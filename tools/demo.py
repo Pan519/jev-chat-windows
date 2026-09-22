@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """端到端冒烟：截图里那段真实对话跑一遍完整链，打印判断 + 排好序的候选。
 
+链路是三段式：Jev 判断（7 道题） → 带着判断起草 3 条 → Jev 排序，两次 Jev 调用。
+
 全程只要两把 key：判断一把 JEV_API_KEY（OpenRouter 或 TypeSafe 的），起草一把 LLM_API_KEY。
 
     set JEV_API_KEY=...   &  set LLM_API_KEY=...    (Windows)
@@ -19,6 +21,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 from core.engine import analyze
 from core.jev_client import JevError
+from core.questions import guidance_text
 
 MESSAGES = [
     ("her", "你今天是不是又忘了我跟你说过什么？"),
@@ -58,6 +61,10 @@ def main() -> int:
                  "should_reply_now", "best_action", "she_needs", "tension_resolved"):
         if name in r["answers"]:
             print("  " + fmt(name, r["answers"][name]))
+
+    block = guidance_text(r["answers"])  # 起草时喂进去的那张小抄
+    if block:
+        print("\n" + block)
 
     print("\n候选（Jev 排序，★ = 推荐）:")
     scores = r.get("scores")

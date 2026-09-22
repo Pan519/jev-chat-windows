@@ -146,7 +146,8 @@ WGC 截微信窗口（GPU 合成窗口也能截，被遮挡也能截）
   → 按气泡颜色分 me / her，灰字（引用块、时间戳、群里的发言人名、链接卡片）过滤掉，
     发言人名摘出来挂到它下面那条消息上
   → 跟上一帧比，滚动翻出来的旧消息不重复上报
-  → 冒出新的 her 消息才调 core.engine.analyze()
+  → 冒出新的 her 消息才调 core.engine.analyze()：三段式
+      ① Jev 判断（7 道题）→ ② 把判断当小抄喂给起草，写 3 条候选 → ③ Jev 只排序
   → 悬浮窗给判断摘要 + 3 条候选 → 点「填入微信」
 ```
 
@@ -182,8 +183,12 @@ WGC 截微信窗口（GPU 合成窗口也能截，被遮挡也能截）
 判断那条 OpenRouter 的路是唯一的例外——`typesafe-sdk` 把路径写死成 `/v1/systemone`，
 打不到 OpenRouter 的 `/api/alpha/decisions`。
 
-两节各一把 key，都必填。起草是**盲起草**——不把
-Jev 的判断喂给它，让它自己读对话；7 道判断题加一道「哪条候选最合适」一次问完，概率就是卡片上的百分比。
+两节各一把 key，都必填。链路是**三段式**（issue #4）：先让 Jev 答 7 道判断题，把
+「对方意图 / 对方需要 / 建议动作 / 紧张度」折成一小段中文小抄喂给起草，三条候选都顺着这个判断写；
+最后再问 Jev 一次「哪条候选最合适」，概率就是卡片上的百分比。**一次分析两次 Jev 调用**——
+以前是盲起草 + 判断和排序一次问完，起草读错意图时三条会一起跑偏，Jev 只能矮子里拔将军。
+判断那次要是挂了（限流、超时），自动退回老路：盲起草 + 一次合问，行为跟以前一样；
+排序那次挂了就按第一条推荐，判断照样显示。
 温度 1.2，`max_tokens` 400；思考模式默认关，开了会带上各家自己的思考开关、`max_tokens` 提到 4000
 （思考过程也算进去，400 会把答案截断）。思考开关只有 DeepSeek / OpenRouter / Anthropic / Gemini 认。模型只给出 1~2 条时会带着它的回答追问一次补齐，还不够就按实际
 条数走（少于 2 条就不排序）。
@@ -314,7 +319,7 @@ core/                   Jev 判断内核，平台无关，跟安卓原版同一�
   providers.py          两张来源表（判断 / 起草）：协议、地址、默认模型；纯数据，不认 key
   llm.py                三种协议的薄适配层，一律走官方 SDK：openai / anthropic / google-genai
   jev_client.py         Jev 判断客户端：OpenRouter（urllib）/ TypeSafe 直连（typesafe-sdk）；脱敏、退避
-  questions.py          7 道判断题 + build_state() + build_rank_question()
+  questions.py          7 道判断题 + build_state() + build_rank_question() + 判断小抄 guidance_text() / 中文标签 CHOICE_LABELS
   draft.py              起草 3 条候选：拼提示词、解析、过滤、不足时追问补齐；调用走 llm.py
 tools/
   demo.py               端到端冒烟：拿一段写死的对话跑完整链（需 key + 联网）
@@ -366,6 +371,9 @@ config.json             你自己的设置，不进仓库（在 .gitignore 里�
 ## 更新记录
 
 **未发版**
+- 先判断再起草（issue #4）：`analyze()` 改成三段式 —— Jev 先答 7 道判断题，判断折成中文小抄喂进
+  起草提示词，最后 Jev 只做排序；一次分析两次 Jev 调用。判断那次失败自动退回老路（盲起草 + 判断和
+  排序一次问完），排序失败就按第一条推荐
 - 设置页「模型」卡片：判断 · Jev（OpenRouter / TypeSafe 直连）+ 起草 · 语言模型（11 家预设 + 自定义
   Base URL），三种协议一律走官方 SDK（`openai` / `anthropic` / `google-genai`），可点「获取模型」拉
   接口的真实列表；**key 收敛成两把** `JEV_API_KEY` / `LLM_API_KEY`，换来源复用同一个槽，老的

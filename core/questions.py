@@ -204,6 +204,51 @@ JUDGE_QUESTIONS: dict = {
 }
 
 
+# choice 类答案的中文说法，界面和起草小抄共用这一份（app/overlay.py 从这里导）。
+CHOICE_LABELS: dict = {
+    "true_intent": {
+        "confirm_you_care": "希望确认你在意", "vent_anger": "表达不满或受伤",
+        "request_action": "希望你采取行动", "seek_explanation": "希望了解原因",
+        "casual_chat": "轻松交流", "close_topic": "平和结束话题",
+    },
+    "best_action": {
+        "check_history": "先核对聊天记录", "apologize": "为已知问题道歉",
+        "give_commitment": "给出具体承诺", "explain": "说明事实与原因",
+        "acknowledge": "回应并表达理解", "say_less": "简短回应或留白",
+        "make_plan": "商量具体安排",
+    },
+    "she_needs": {
+        "apology": "真诚道歉", "action": "具体行动或安排", "explanation": "清楚的解释",
+        "care": "关注与在意", "nothing": "可能无需补充回应",
+    },
+}
+
+_GUIDE_FIELDS = (("true_intent", "对方意图"), ("she_needs", "对方需要"),
+                 ("best_action", "建议动作"))
+
+
+def guidance_text(answers: dict) -> str:
+    """Jev 判断 → 喂给起草的中文小抄。只写有答案的那几项；没答案返回空串。"""
+    lines = []
+    for name, title in _GUIDE_FIELDS:
+        choice = ((answers or {}).get(name) or {}).get("choice")
+        label = CHOICE_LABELS[name].get(choice)
+        if label:
+            lines.append(f"- {title}：{label}（{choice}）")
+    tail = []
+    score = ((answers or {}).get("danger_level") or {}).get("score")
+    if isinstance(score, (int, float)) and not isinstance(score, bool):
+        tail.append(f"紧张度：{score:.0f}/9")
+    noul = ((answers or {}).get("literal_question") or {}).get("noul")
+    if isinstance(noul, (int, float)) and not isinstance(noul, bool):
+        tail.append("字面意思：" + ("是" if noul >= 0.5 else "否（有潜台词）"))
+    if tail:
+        lines.append("- " + "；".join(tail))
+    if not lines:
+        return ""
+    return "判断参考（Jev 给的，起草要顺着它写，但口吻仍按我的）：\n" + "\n".join(lines)
+
+
 def build_state(messages: list, relationship: str, keep: int = 10,
                 reply_to: str | None = None) -> dict:
     """messages: (from, text) / (from, text, name) / dict（name 可选）。from 只认 her/me。
