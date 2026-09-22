@@ -210,7 +210,7 @@ Jev 的判断喂给它，让它自己读对话；7 道判断题加一道「哪�
 下载 exe 的只看前三条；Python 只有源码运行 / 自己打包才需要。
 
 - **Windows 10 1903+ 或 Windows 11**（Windows Graphics Capture 的最低要求）
-- **Python 3.10+**（Releases 里的 exe 是 CI 用 3.11 打的；只想用 exe 的话不用装 Python）
+- **Python 3.10–3.12**（Releases 里的 exe 是 CI 用 3.11 打的；只想用 exe 的话不用装 Python。3.13+ 不行：rapidocr-onnxruntime 1.4.x 官方包 requires_python 封顶 <3.13，pip 会静默改装 1.2.3，启动即 KeyError）
 - **微信 Windows 4.x**（`Weixin.exe`）
 - **两把 API key**：判断用 `JEV_API_KEY`，默认来源 [OpenRouter](https://openrouter.ai/)（或
   [TypeSafe 直连](https://console.typesafe.ai/)）；起草用 `LLM_API_KEY`，默认
