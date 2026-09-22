@@ -166,15 +166,18 @@ class _ReplyCard(_Surface):
 
 
 class Overlay:
-    def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None):
+    def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None,
+                 on_toggle_debug=None):
         """result_of(会话名) → 那个会话上次的结果或 None；切着看别的会话时用它把旧结果放回来。
-        on_target_change(会话名, 人名) → 用户在群里挑了回复对象。"""
+        on_target_change(会话名, 人名) → 用户在群里挑了回复对象。
+        on_toggle_debug(开不开) → 开关调试视图那个独立窗口。"""
         self.app = QApplication.instance() or QApplication([])
         setTheme(Theme.LIGHT)
         setThemeColor(_GREEN, save=False)
         self.on_fill = on_fill
         self.on_toggle_capture = on_toggle_capture
         self.on_target_change = on_target_change
+        self.on_toggle_debug = on_toggle_debug
         self.result_of = result_of
         self.cands = []
         self.cards = []
@@ -494,6 +497,19 @@ class Overlay:
         box.addWidget(self._hint(
             "只向 GitHub 查最新版本号，不发送任何数据。国内访问 GitHub 慢的话关掉也行。"
         ))
+        debug_row = QHBoxLayout()
+        debug_row.addWidget(_label("调试视图", 13), 1)
+        self.debugSwitch = SwitchButton()
+        self.debugSwitch.setOnText("开")
+        self.debugSwitch.setOffText("关")
+        self.debugSwitch.setAccessibleName("调试视图")
+        self.debugSwitch.checkedChanged.connect(self._debug_toggled)  # 这个开关立刻生效，不等「保存设置」
+        debug_row.addWidget(self.debugSwitch)
+        box.addLayout(debug_row)
+        box.addWidget(self._hint(
+            "另开一个窗口实时显示截到的画面和识别框：绿 = 我、蓝 = 对方、灰 = 过滤掉的灰字、"
+            "红 = 当成图片丢掉、黄 = 小字丢掉。只在内存里画，不存图。"
+        ))
         body.addWidget(preference)
 
         models = _Surface()
@@ -706,6 +722,7 @@ class Overlay:
         self.baseEdit.setText(settings.draft_base_url())
         self.thinkingSwitch.setChecked(settings.thinking())
         self.updateSwitch.setChecked(settings.check_update())
+        self.set_debug_switch(settings.debug_view())  # 屏蔽信号地拨，别在加载时开关一遍窗口
         self._sync_model_fields()  # 上面屏蔽了信号，这里补一次
         self.settingsFeedback.hide()
 
@@ -756,6 +773,18 @@ class Overlay:
         if not self.cands and not self._busy:
             self._empty_text()
             self.set_status("设置已就绪，等待新消息", "idle")
+
+    def _debug_toggled(self, on):
+        """调试视图独立于「保存设置」：拨一下就开窗/收窗，顺手落盘，重启还在。"""
+        settings.save(debug_view_on=on)
+        if self.on_toggle_debug:
+            self.on_toggle_debug(on)
+
+    def set_debug_switch(self, on):
+        """调试窗被用户直接关掉时把开关拨回去；屏蔽信号，免得又回调一圈。"""
+        self.debugSwitch.blockSignals(True)
+        self.debugSwitch.setChecked(on)
+        self.debugSwitch.blockSignals(False)
 
     def _settings_feedback(self, text, error=False):
         color = "#b44832" if error else _GREEN

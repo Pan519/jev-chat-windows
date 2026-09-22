@@ -84,6 +84,10 @@ def check_update() -> bool:
     """启动时要不要去 GitHub 查一次最新版本号：默认开，只出这一次网，设置里能关。"""
     return bool(_read("check_update", True))
 
+def debug_view() -> bool:
+    """调试视图：另开一个窗口实时画识别框。默认关，开了子进程才往队列里送帧。"""
+    return bool(_read("debug_view", False))
+
 def _read_env(env_name: str) -> str:
     """进程环境优先；没有就读注册表并带进进程环境，之后 core/ 里按 os.environ 读就有了。"""
     v = os.environ.get(env_name, "").strip()
@@ -132,13 +136,13 @@ def has_llm_key() -> bool:
 
 has_key = has_jev_key  # 旧名字：界面上「配没配好」问的就是判断模型这把 key
 
-def save(relationship_text: str, context_n: int | None = None, *,
+def save(relationship_text: str | None = None, context_n: int | None = None, *,
          jev_provider_text: str | None = None, jev_key_text: str | None = None,
          jev_model_text: str | None = None, draft_provider_text: str | None = None,
          llm_key_text: str | None = None, draft_model_text: str | None = None,
          draft_base_url_text: str | None = None, reply_target_on: bool | None = None,
          style_text: str | None = None, thinking_on: bool | None = None,
-         check_update_on: bool | None = None) -> None:
+         check_update_on: bool | None = None, debug_view_on: bool | None = None) -> None:
     """每个参数为空/None = 保留当前值。两把 key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
@@ -154,13 +158,16 @@ def save(relationship_text: str, context_n: int | None = None, *,
     # 整个 dict 必须在 open(..., "w") **之前**拼好：open 一上来就把文件截断，
     # 之后再 _read() 读到的是空文件，None 那几项就不是「保留」而是被清空了。
     data = {
-        "relationship": relationship_text, "context": n, "style": keep(style_text, "style"),
+        # 关系为空 = 只改别的开关（调试视图那种单项保存），别把它写没了
+        "relationship": relationship_text or relationship(), "context": n,
+        "style": keep(style_text, "style"),
         "jev_provider": jev, "jev_model": keep(jev_model_text, "jev_model"),
         "draft_provider": draft, "draft_model": keep(draft_model_text, "draft_model"),
         "draft_base_url": keep(draft_base_url_text, "draft_base_url"),
         "reply_target": flag(reply_target_on, reply_target),
         "thinking": flag(thinking_on, thinking),
         "check_update": flag(check_update_on, check_update),
+        "debug_view": flag(debug_view_on, debug_view),
     }
     with open(_CONFIG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)

@@ -10,7 +10,7 @@ hiddenimports = [
     # spawn 出来的采集子进程按名字 import app.worker，再顺着它拉 capture/ocr；
     # 父进程这边 engine 也是运行时才走到，一并钉死，别指望静态分析都能扫出来
     "app.worker", "app.capture", "app.ocr", "app.fill", "app.overlay", "app.settings",
-    "app.version", "app.update",
+    "app.version", "app.update", "app.debugwin",  # debugwin 是开了调试视图才 import 的
     "core.engine", "core.draft", "core.jev_client", "core.questions", "core.providers",
     "core.llm",
 ]

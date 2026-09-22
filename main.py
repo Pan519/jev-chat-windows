@@ -57,9 +57,33 @@ def fill_reply(text):
 
 def spawn_worker():
     """开一个采集子进程，它跟着 capture_on 走：置位=采集，清掉=暂停。"""
-    p = multiprocessing.Process(target=worker.run, args=(q, state["hwnd"], capture_on), daemon=True)
+    p = multiprocessing.Process(target=worker.run,
+                                args=(q, state["hwnd"], capture_on, debug_on), daemon=True)
     p.start()
     return p
+
+
+def set_debug(on):
+    """调试视图开关：开 → 开窗 + 置位（子进程这才开始送帧，一帧 2~3MB）；关 → 清掉 + 收窗。"""
+    global dbg
+    if not on:
+        debug_on.clear()
+        if dbg is not None:
+            dbg.hide()
+        return
+    if dbg is None:
+        from app.debugwin import DebugWindow
+
+        dbg = DebugWindow(on_close=on_debug_closed)
+    dbg.show()
+    debug_on.set()
+
+
+def on_debug_closed():
+    """用户直接关了调试窗 = 把开关也关了，否则设置页显示开着但没窗。"""
+    debug_on.clear()
+    ov.set_debug_switch(False)
+    settings.save(debug_view_on=False)
 
 
 def on_toggle_capture(on):
@@ -144,6 +168,10 @@ def drain():
         if kind == "chat":  # 微信切了会话，界面跟过去（用户正浏览别的会话时也跟，微信是准的）
             state["chat"] = msg[1]
             ov.set_chat(msg[1])
+            continue
+        if kind == "debug":  # 调试视图的一帧；窗口不在就直接丢掉
+            if dbg is not None:
+                dbg.show_packet(msg[1])
             continue
         if kind == "status":  # 单帧识别失败/报错，提示一下就好，别把正在跑的分析和已知坐标清掉
             ov.set_status(msg[1], "warning")
@@ -232,10 +260,11 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     ctypes.windll.user32.SetProcessDPIAware()
     q = multiprocessing.Queue()
     capture_on = multiprocessing.Event()  # 父子进程共用的开关，置位=采集
+    debug_on = multiprocessing.Event()  # 同上，置位=子进程往队列里送整帧给调试窗
     ov = Overlay(on_fill=fill_reply, on_toggle_capture=on_toggle_capture,
-                 on_target_change=on_target_change,
+                 on_target_change=on_target_change, on_toggle_debug=set_debug,
                  result_of=lambda t: chats.get(t, {}).get("result"))
-    child = None
+    child = dbg = None
     try:
         state["hwnd"] = find_wechat_hwnd()
     except RuntimeError:
@@ -243,6 +272,8 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     else:
         capture_on.set()
         child = spawn_worker()
+    if settings.debug_view():  # 上次开着就直接开回来
+        set_debug(True)
     if not settings.has_jev_key():
         ov.set_status("请先在设置中配置模型", "warning")
         ov.after(0, ov.open_settings)
