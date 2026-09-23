@@ -118,6 +118,8 @@ class Reader:
                 lines[-1][4] = bottom
             else:
                 lines.append([who, nm, text, top, bottom])
+        # 语音输入的固定提示文案不是消息（双保险：输入框区本不该圈进消息区）
+        lines = [l for l in lines if "语音输入" not in l[2] and "按住鼠标" not in l[2]]
         return [(w, n, t, y) for w, n, t, y, _ in lines]
 
     def new_lines(self, lines):

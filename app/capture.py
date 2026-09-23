@@ -76,7 +76,11 @@ def chat_area(full, header_h=60):
     seps = y0 + np.where((band.std(axis=(1, 2)) < 4) & (row[y0:y1] < 0.1))[0]
     seps = [int(s) for i, s in enumerate(seps) if i == 0 or s - seps[i - 1] > 3]
     below = [s for s in seps if s > y0 + 0.45 * (y1 - y0)]
-    y_in = below[0] if below else y1
+    # 微信 4.x 的输入框区往往没有整行分隔线（seps 里能找到的线全在 45% 高度线以上），
+    # 旧逻辑这时 y_in 退回 y1，会把整个输入框圈进消息区——语音输入时框里的提示/转写文字
+    # 就被 OCR 当成对方消息。没找到分隔线就按「输入框约占窗口底部 9%（最小 120px）」
+    # 保守估算：宁可少截一点消息，也不把输入框圈进来。
+    y_in = below[0] if below else y1 - max(120, int(0.09 * (y1 - y0)))
     above = [s for s in seps if y0 + header_h < s < y_in - 50]
     y_top = above[-1] if above else y0 + header_h
     if x1 - x0 < 100 or y_in - y_top < 40:

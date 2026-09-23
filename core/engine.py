@@ -66,6 +66,10 @@ def analyze(messages: list, relationship: str, model: str | None = None,
                                   reply_to=reply_to, style=style, thinking=thinking,
                                   guidance=guidance_text(answers) if judged else None,
                                   extra_params=draft_extra, filter_noise=filter_noise)
+    if not candidates:
+        # 过滤后候选全空：不抛的话下面 candidates[best_index] 会 IndexError，
+        # 界面只能显示通用失败提示；走 JevError 才能带上人话原因
+        raise JevError("三条候选全被过滤（对话可能全是系统通知或注入样本），稍后再试")
 
     questions = {} if judged else dict(JUDGE_QUESTIONS)
     if len(candidates) >= 2:  # 起草只给了 1 条就没什么可排的，判断题照问
