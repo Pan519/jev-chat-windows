@@ -100,6 +100,11 @@ def bubble_layer() -> bool:
     """微信聊天区气泡浮层（对方消息 + Jev 判断 + 三条候选画在微信上）：默认开。"""
     return bool(_read("bubble_layer", True))
 
+def vision_draft() -> bool:
+    """起草用视觉模型读屏：开了以后聊天区截图直接发给起草模型（需模型支持图片输入）。
+    会话名识别和触发检测仍用本地 OCR——判断/排序也还需要文字。"""
+    return bool(_read("vision_draft", False))
+
 def filter_system_msgs() -> bool:
     """过滤群聊系统通知（进群/退群/撤回/时间戳）：默认开。
     开 = OCR 入口直接不进上下文 + 给起草模型注入忽略提示词；关 = 原样送进分析。"""
@@ -189,6 +194,7 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
          check_update_on: bool | None = None, debug_view_on: bool | None = None,
          snap_follow_on: bool | None = None, bubble_layer_on: bool | None = None,
          filter_system_msgs_on: bool | None = None,
+         vision_draft_on: bool | None = None,
          bubble_offset_pair: list | tuple | None = None) -> None:
     """每个参数为空/None = 保留当前值。两把 key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
@@ -220,6 +226,7 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "snap_follow": flag(snap_follow_on, snap_follow),
         "bubble_layer": flag(bubble_layer_on, bubble_layer),
         "filter_system_msgs": flag(filter_system_msgs_on, filter_system_msgs),
+        "vision_draft": flag(vision_draft_on, vision_draft),
         # 浮层拖拽偏移：None = 原样保留；[dx, dy] = 存下（拖回默认位就存 [0, 0]，效果一样）
         "bubble_offset": list(bubble_offset_pair) if bubble_offset_pair is not None
         else (_read("bubble_offset") or [0, 0]),

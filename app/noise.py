@@ -18,20 +18,30 @@ _SYSTEM_NOISE = re.compile(
     r"|开启了朋友圈权限"
     r"|拍了拍.{0,12}"
 )
-_TIME_ONLY = re.compile(r"^\d{1,2}:\d{2}$")  # 纯时间戳分隔行
+_TIME_ONLY = re.compile(r"^\d{1,2}:\d{2}$")  # 时间戳分隔行
+_DATE_ONLY = re.compile(r"^\d{1,4}[-/.]\d{1,2}([-/.]\d{1,4})?$")  # 日期分隔行（09/08、2025-09-23）
 _LEADING_QUOTE = re.compile(r'^(?:["“」】][^"“「【】]{1,24}["”」】]|[「【][^」】]{1,24}[」】])\s*')
+# 通知动词：人名（带不带引号都有）后面紧跟这些词的，开头那截就是人名，不是消息内容
+_NOISE_VERB = re.compile(r"^(?:通过扫描|邀请|撤回|退出|移出|被|加入|拍了拍)")
+_LEADING_NAME = re.compile(r"^[^，。！？：；""'\s]{1,12}")
 
 
 def is_system_noise(text: str) -> bool:
     """这行是不是群聊系统通知/时间戳（不是任何人说的话）。设置里的「过滤系统通知」开关用它。
-    先剥掉系统通知开头的人名引用（"小白"退出群聊），再要求**整行**命中通知短语——
+    先去掉全部空白（OCR 会在字间插空格：『加 入群聊』『撤回 了一条消息』，不处理就漏），
+    再剥掉开头的人名引用（"小白"退出群聊），最后要求**整行**命中通知短语——
     只用子串搜索会把聊到这些词的真人消息一起误杀。"""
-    t = str(text or "").strip()
-    if _TIME_ONLY.match(t):
+    t = re.sub(r"\s+", "", str(text or ""))
+    if not t:
+        return False
+    if _TIME_ONLY.match(t) or _DATE_ONLY.match(t):
         return True
-    while True:
+    while True:  # 剥引号人名："小白"退出群聊
         stripped = _LEADING_QUOTE.sub("", t)
         if stripped == t:
             break
         t = stripped
+    m = _LEADING_NAME.match(t)  # 剥裸人名：赵凝神"通过扫描"…（人名不一定带引号）
+    if m and _NOISE_VERB.match(t[m.end():]):
+        t = t[m.end():]
     return bool(_SYSTEM_NOISE.fullmatch(t))

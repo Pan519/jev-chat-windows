@@ -119,6 +119,11 @@ class _Fetched(QObject):
     done = Signal(object, list, str)
 
 
+class _Tested(QObject):
+    """配置测试的后台线程 → 主线程：哪一组、成功否、给人看的说明。"""
+    done = Signal(object, bool, str)
+
+
 class _TitleBar(QWidget):
     """只有标题栏可拖动，选择正文或按按钮不会意外移动窗口。
     拖完回调一下：悬浮窗从「吸附跟随」切到「用户钉住了」，不再自动挪，直到重新保存设置。"""
@@ -296,10 +301,10 @@ class _BubbleLayer(QWidget):
         import re
         return re.sub(r"[\s\W_]+", "", t or "").lower()
 
-    def set_content(self, her, lines, result, compact=False):
+    def set_content(self, her, lines, result):
         """全部内容合并成**一块**半透明面板（不再分散）：
         对方最新消息 → Jev 分析 → 三条候选（每行可点，✓ 为推荐），中间细分隔线。
-        字号是常规气泡的一半；复读对方消息的候选直接不画。"""
+        对方原文永远显示；复读对方消息的候选直接不画。"""
         self._clear()
         panel_w = max(240, (self.width() or 280) - 4)
         her_n = self._norm(her)
@@ -314,7 +319,7 @@ class _BubbleLayer(QWidget):
         inner.setContentsMargins(7, 5, 7, 4)
         inner.setSpacing(1)
 
-        if her and not compact:
+        if her:
             head = _label("对方", 10, "#8a9a90", True)
             inner.addWidget(head)
             # 原文只显示前 50 字：面板高度有限，塞下全文会把候选挤出可视区
@@ -426,9 +431,10 @@ class _BubbleLayer(QWidget):
         （settings.bubble_offset，松手即存，重启不变）。拖拽进行中不抢位置。"""
         x0, y_top, x1, y_in = area
         dpr = QApplication.instance().primaryScreen().devicePixelRatio() or 1.0
-        w = max(216, min(316, round((x1 - x0) / dpr) - 36))  # 比之前窄 2 个中文字符（上限 340-24）
-        half_h = round((y_in - y_top) / dpr * 0.5) - 6
-        h = min(290, max(170, half_h))
+        w = max(216, min(316, round((x1 - x0) / dpr) - 36))  # 比消息区窄 2 个中文字符
+        # 高度 = 消息区高度 - 120：底部留出自己最新的消息和输入框，其余全给面板（原文不再被挤掉）
+        avail_h = round((y_in - y_top) / dpr)
+        h = min(290, max(160, avail_h - 120))
         self._placed = (w, h)
         x = round(x1 / dpr) - w - 2
         y = round(y_top / dpr)  # 完全贴住聊天区上边缘
@@ -444,7 +450,6 @@ class _BubbleLayer(QWidget):
             self.move(x, y)
         if not self.isVisible():
             self.show()
-        return h >= 230  # 空间够才画对方消息
 
 class Overlay:
     def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None,
@@ -482,6 +487,7 @@ class Overlay:
         self._bubble = None  # 微信聊天区的气泡浮层（懒创建）
         self._bubble_key = None  # 浮层当前内容对应的 (会话, 结果)，变了才重画
         self._bubble_result = None  # 浮层里候选对应的结果（点击填入用）
+        self._bubble_errors = {}  # {会话名: 失败原因}——生成失败时浮层显示它，而不是留着旧建议
         self._loading = False  # 回显设置中：开关 setChecked 会触发即时保存，装载期间必须拦住，
         # 不然回显到一半的默认值会把已经存好的设置冲掉（「设置有时候未持久化」的真凶）
         self.win = _MainWindow(self._relayout)
@@ -583,6 +589,14 @@ class Overlay:
             self._compact = compact
             self._apply_compact(compact)
         self.feed.setFixedHeight(max(100, min(240, int(h * 0.25))))
+        self._elide_chat_name()
+
+    def _elide_chat_name(self):
+        """会话名过长时显示省略号（内部键仍是全名，切换/存储不受影响）。"""
+        if not self._chat:
+            return
+        width = max(60, self.chatBox.width() - 30)
+        self.chatBox.setText(self.chatBox.fontMetrics().elidedText(self._chat, Qt.ElideRight, width))
 
     def _apply_compact(self, compact):
         """紧凑/常规两套间距和可见性；断点没变时不会被调用。"""
@@ -709,10 +723,12 @@ class Overlay:
 
         actions_row = QHBoxLayout()
         self.historyButton = PushButton(FIF.HISTORY, "聊天记录")
+        self.historyButton.setMinimumWidth(0)
         self.historyButton.clicked.connect(self._toggle_history)
         self.historyButton.setAccessibleName("展开或收起聊天记录")
         actions_row.addWidget(self.historyButton, 1)
         self.refreshButton = PushButton(FIF.SYNC, "重新生成")
+        self.refreshButton.setMinimumWidth(0)
         self.refreshButton.setToolTip("用当前会话已有的聊天记录再生成一轮建议（生成失败或想换个写法时用）")
         self.refreshButton.setAccessibleName("重新生成回复建议")
         self.refreshButton.clicked.connect(self._refresh_clicked)
@@ -900,8 +916,23 @@ class Overlay:
         bubble_row.addWidget(self.bubbleSwitch)
         box.addLayout(bubble_row)
         box.addWidget(self._hint(
-            "把对方最新消息、Jev 判断和三条候选直接画在微信聊天区上（截图那种效果），"
+            "把对方最新消息、Jev 判断和三条候选直接画在微信聊天区上，"
             "点候选气泡即填入。跟着微信同层显示，微信被盖住它也跟着被盖。"
+        ))
+        vision_row = QHBoxLayout()
+        vision_row.addWidget(_label("起草用视觉模型读屏", 13), 1)
+        self.visionSwitch = SwitchButton()
+        self.visionSwitch.setOnText("开")
+        self.visionSwitch.setOffText("关")
+        self.visionSwitch.setAccessibleName("起草用视觉模型读屏")
+        self.visionSwitch.checkedChanged.connect(self._instant_save)
+        vision_row.addWidget(self.visionSwitch)
+        box.addLayout(vision_row)
+        box.addWidget(self._hint(
+            "开了以后起草时把聊天区截图直接发给模型（仅聊天对话区，不含侧边栏），"
+            "图片/表情等文字读不出的内容也能看见。模型就是上面「起草」组里选的那个——"
+            "需要支持图片输入的型号（如 GLM-4V、GPT-4o、Qwen-VL 系列），不支持的会报错，关掉即可；"
+            "会话名识别和触发检测仍用本地 OCR。"
         ))
         noise_row = QHBoxLayout()
         noise_row.addWidget(_label("过滤群聊系统通知", 13), 1)
@@ -950,6 +981,8 @@ class Overlay:
         box.addWidget(_label("模型", 16, "#304c3c", True))
         self._fetched = _Fetched()
         self._fetched.done.connect(self._models_fetched)
+        self._tested = _Tested()
+        self._tested.done.connect(self._test_finished)
         self.jev = self._model_group(box, "判断 · Jev", "jev", providers.JEV_PROVIDERS)
         box.addWidget(self._hint(
             "判断意图、紧张度，并给三条候选排序。OpenRouter / TypeSafe 是同一个 Jev；"
@@ -1061,7 +1094,8 @@ class Overlay:
                           check_update_on=self.updateSwitch.isChecked(),
                           thinking_on=self.thinkingSwitch.isChecked(),
                           bubble_layer_on=self.bubbleSwitch.isChecked(),
-                          filter_system_msgs_on=self.noiseSwitch.isChecked())
+                          filter_system_msgs_on=self.noiseSwitch.isChecked(),
+                          vision_draft_on=self.visionSwitch.isChecked())
         except Exception:
             pass  # 存不进去（磁盘只读之类）别把界面搞崩，下次点「保存设置」还能兜住
 
@@ -1112,9 +1146,16 @@ class Overlay:
         model_label.setBuddy(group.modelBox)
         row.addWidget(group.modelBox, 1)
         group.fetchButton = PushButton("获取模型")
+        group.fetchButton.setMinimumWidth(0)  # 窄窗时允许压缩，别把页面撑出可视区
         group.fetchButton.setAccessibleName(f"获取{title}的可用模型列表")
         group.fetchButton.clicked.connect(lambda: self._fetch_models(group))
         row.addWidget(group.fetchButton)
+        group.testButton = PushButton("测试")
+        group.testButton.setMinimumWidth(0)
+        group.testButton.setToolTip("用当前配置发一次最小请求，验证地址、密钥和模型是否可用")
+        group.testButton.setAccessibleName(f"测试{title}配置")
+        group.testButton.clicked.connect(lambda: self._test_models(group))
+        row.addWidget(group.testButton)
         box.addLayout(row)
         group.status = _label("", 12, _MUTED)
         box.addWidget(group.status)
@@ -1203,11 +1244,12 @@ class Overlay:
         group.status.setText(f"共 {len(models)} 个")
 
     def _set_group(self, group, provider, model):
-        """把存下来的来源和模型放回一组控件里；填充不算用户操作，别触发换来源的重置。"""
+        """把存下来的来源和模型放回一组控件里；填充不算用户操作，别触发换来源的重置。
+        密钥直接填入（PasswordLineEdit 自带眼睛图标切换明文），免得每次重输。"""
         group.providerBox.blockSignals(True)
         group.providerBox.setCurrentIndex(group.ids.index(provider))
         group.providerBox.blockSignals(False)
-        group.keyEdit.clear()
+        group.keyEdit.setText(group.stored_key())
         group.modelBox.clear()
         group.modelBox.setText(model)
         group.status.setText("")
@@ -1248,6 +1290,7 @@ class Overlay:
         self.snapSwitch.setChecked(settings.snap_follow())
         self.bubbleSwitch.setChecked(settings.bubble_layer())
         self.noiseSwitch.setChecked(settings.filter_system_msgs())
+        self.visionSwitch.setChecked(settings.vision_draft())
         self.set_debug_switch(settings.debug_view())  # 屏蔽信号地拨，别在加载时开关一遍窗口
         self._sync_model_fields()  # 上面屏蔽了信号，这里补一次
         self.settingsFeedback.hide()
@@ -1356,8 +1399,6 @@ class Overlay:
         (self.relationshipBox if settings.has_key() else self.jev.keyEdit).setFocus()
 
     def _back_home(self):
-        self.jev.keyEdit.clear()
-        self.draft.keyEdit.clear()
         self.pages.setCurrentWidget(self.home)
         self.settingsButton.setEnabled(True)
 
@@ -1488,24 +1529,43 @@ class Overlay:
         y = max(st, y)
         return x / dpr, y / dpr, w / dpr, h / dpr
 
+    def set_bubble_error(self, chat, reason):
+        """记录某会话的生成失败原因：浮层面板显示它（而不是留着一轮旧建议误导人）。"""
+        self._bubble_errors[chat] = reason.strip()[:200]
+
     def sync_bubble(self, chat, area):
         """微信聊天区气泡浮层：把当前微信会话的对方消息、Jev 判断、三条候选画到消息区上。
         chat/area 为空、没结果或开关关 → 隐藏。main 每 250ms 调一次（位置跟微信走）。"""
         on = settings.bubble_layer() and bool(chat) and bool(area)
         result = self.result_of(chat) if (on and self.result_of) else None
-        if not on or not result:
+        err = self._bubble_errors.get(chat)
+        if not on or (not result and not err):
             if self._bubble is not None and self._bubble.isVisible():
                 self._bubble.hide()
             return
         if self._bubble is None:
             self._bubble = _BubbleLayer(self)
-        compact = not self._bubble.place(area)  # 先定位：顺带知道空间够不够画对方消息
+        if result is None:  # 生成失败：面板显示原因 + 重试提示（新结果到达时自动清掉）
+            key = ("err", chat, err)
+            if key != self._bubble_key:
+                self._bubble_key = key
+                self._bubble_result = None
+                self._bubble.place(area)
+                self._bubble.set_content(
+                    self.hers.get(chat) or "",  # 原文留着，失败也知道自己在回什么
+                    ["生成失败：" + err, "点「↻ 重新生成」可重试"],
+                    {"candidates": []})
+            else:
+                self._bubble.place(area)
+            return
+        self._bubble_errors.pop(chat, None)  # 成功了就清掉错误态
+        self._bubble.place(area)
         key = (chat, result.get("seq") or id(result))
         if key != self._bubble_key:
             self._bubble_key = key
             self._bubble_result = result
             self._bubble.set_content(self.hers.get(chat) or "",
-                                     judgment_lines(result), result, compact=compact)
+                                     judgment_lines(result), result)
 
     def bubble_hwnd(self):
         """浮层的 Win32 句柄（没建或没显示返回 0）：main 拿它把浮层钉在微信正上方。"""
@@ -1614,6 +1674,47 @@ class Overlay:
         if self.on_refresh:
             self.on_refresh()
 
+    def _test_models(self, group):
+        """「测试」：用当前配置发一次最小请求，验证地址、密钥、模型是否真的能用。
+        起草发一轮 10 tokens 的小对话；判断拉一次模型列表（decisions 接口没有更便宜的探测）。"""
+        provider = self._provider_of(group)
+        base = group.baseEdit.text().strip() or None
+        key = group.keyEdit.text().strip() or group.stored_key()
+        model = group.modelBox.text().strip() or None
+        if not key:
+            group.status.setText("测试：先填密钥")
+            return
+        if provider in providers.CUSTOM and not base:
+            group.status.setText("测试：先填 Base URL")
+            return
+        group.status.setText("测试中…")
+        group.testButton.setEnabled(False)
+        threading.Thread(target=lambda: self._run_test(group, provider, key, base, model),
+                         daemon=True).start()
+
+    def _run_test(self, group, provider, key, base, model):
+        try:
+            if group.kind == "jev":
+                models = jev_client.list_models(provider, key, base_url=base)
+                ok, msg = bool(models), f"✓ 连通正常，{len(models)} 个模型"
+            else:
+                spec = providers.DRAFT_PROVIDERS[provider]
+                reply = llm.chat(spec.protocol, base or spec.base, key,
+                                 model or spec.default, "你是连通性测试。", ["只回复：正常"],
+                                 temperature=0, max_tokens=10, timeout=20)
+                ok = bool(reply and reply.strip())
+                msg = f"✓ 连通正常（回复：{reply.strip()[:20]}）" if ok else "✗ 模型返回为空"
+        except Exception as exc:
+            ok, msg = False, "✗ " + str(exc)[:100]
+        self._tested.done.emit(group, ok, msg)
+
+    def _test_finished(self, group, ok, msg):
+        group.testButton.setEnabled(True)
+        group.status.setText(msg)
+        from PySide6.QtGui import QColor as _C
+        qss = ("BodyLabel { color: " + (_GREEN if ok else "#b44832") + "; background: transparent; }")
+        setCustomStyleSheet(group.status, qss, qss)
+
     def _toggle_history(self):
         self.feed.setVisible(self.feed.isHidden())
         self._history_title()
@@ -1716,6 +1817,7 @@ class Overlay:
         self._history_title()
         self._follow_text()
         self._render_targets()
+        self._elide_chat_name()
         self.show_cached(self.result_of(title) if self.result_of else None)
 
     def set_targets(self, chat, senders, current):

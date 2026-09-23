@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 try:
-    from .draft import draft_candidates
+    from . import draft as draft_mod
+    from .draft import draft_candidates, vision_transcribe
     from .jev_client import JevError, ask
     from .questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
 except ImportError:
-    from draft import draft_candidates
+    from . import draft as draft_mod
+    from draft import draft_candidates, vision_transcribe
     from jev_client import JevError, ask
     from questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
 
@@ -28,7 +30,8 @@ def analyze(messages: list, relationship: str, model: str | None = None,
             base_url: str | None = None, reply_to: str | None = None, style: str = "",
             thinking: bool = False, jev_provider: str = "openrouter",
             jev_model: str | None = None, draft_extra: dict | None = None,
-            jev_base_url: str | None = None, filter_noise: bool = False) -> dict:
+            jev_base_url: str | None = None, filter_noise: bool = False,
+            vision_image: bytes | None = None) -> dict:
     """messages: [(from, text)] from ∈ {her, me}，最新一条在最后；
     群聊里可以带第三项 name（说这句话的人），单聊不带。
     context: 起草和判断各看最近多少条消息（用户设置里的「参考上下文」）。
@@ -48,6 +51,16 @@ def analyze(messages: list, relationship: str, model: str | None = None,
     三段式（issue #4）：先让 Jev 答 7 道判断题，把判断当小抄喂给起草，最后 Jev 只排序。
     判断那次挂了就退回老路：盲起草 + 判断和排序一次问完，行为跟以前一样。usage 是两次之和。
     """
+    if vision_image:
+        # 视觉模式：先让视觉模型把截图转写成消息列表（免 OCR 文字），判断和起草都用它
+        try:
+            transcribed = draft_mod.vision_transcribe(
+                vision_image, relationship, provider=provider, model=model, base_url=base_url,
+                timeout=timeout, extra_params=draft_extra)
+            if transcribed:
+                messages = transcribed[-context:] if context else transcribed
+        except JevError:
+            pass  # 转写失败退回 OCR 文字路线
     state = build_state(messages, relationship, keep=context, reply_to=reply_to)
     usage: dict = {}
     answers: dict = {}
@@ -65,7 +78,8 @@ def analyze(messages: list, relationship: str, model: str | None = None,
                                   base_url=base_url, timeout=timeout, keep=context,
                                   reply_to=reply_to, style=style, thinking=thinking,
                                   guidance=guidance_text(answers) if judged else None,
-                                  extra_params=draft_extra, filter_noise=filter_noise)
+                                  extra_params=draft_extra, filter_noise=filter_noise,
+                                  vision_image=vision_image)
     if not candidates:
         # 过滤后候选全空：不抛的话下面 candidates[best_index] 会 IndexError，
         # 界面只能显示通用失败提示；走 JevError 才能带上人话原因

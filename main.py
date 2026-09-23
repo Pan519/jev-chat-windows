@@ -34,7 +34,7 @@ from core.engine import analyze
 # senders：这个群里发过言的人，去重、最近的排最前；target：用户挑的回复对象（None = 跟着最近那个走）
 chats = {}
 state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": "",
-         "refresh_wait": None, "refresh_ts": 0.0}
+         "refresh_wait": None, "refresh_ts": 0.0, "vision": {}}  # vision: {会话: 最新消息区截图 JPEG}
 results = queue.Queue()
 update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
 cmd_q = multiprocessing.Queue()  # 发给采集子进程的指令（"refresh" = 强制重读当前画面）  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
@@ -161,6 +161,7 @@ def analyze_bg(msgs, title, revision, reply_to=None):
                                    thinking=settings.thinking(),
                                    draft_extra=settings.draft_extra(),
                                    filter_noise=settings.filter_system_msgs(),
+                                   vision_image=state["vision"].get(title),
                                    jev_provider=settings.jev_provider(),
                                    jev_model=settings.jev_model() or None,
                                    jev_base_url=settings.jev_base_url() or None),
@@ -231,6 +232,9 @@ def drain():
         if kind == "status":  # 单帧识别失败/报错，提示一下就好，别把正在跑的分析和已知坐标清掉
             ov.set_status(msg[1], "warning")
             ov.log(msg[1])
+            continue
+        if kind == "vision":  # 视觉开关开时的消息区截图：每个会话只留最新一张
+            state["vision"][msg[1]] = msg[2]
             continue
         if kind == "refresh_lines":  # 「重新生成」的强制重读结果：合并进历史（按相似度去重）再生成
             _, title, rows, rect = msg
@@ -386,9 +390,13 @@ def tick():
                 else:
                     ov.set_busy(False)
             else:
-                ov.show_judgment(title, f"本轮判断失败：{str(r)[:160]}")  # 失败也进气泡，别静默
+                reason = str(r).replace("分析失败：", "").replace("分析失败: ", "").strip()
+                chat_of(title)["result"] = None  # 失败：作废旧结果，浮层才肯显示错误面板
+                state["vision"].pop(title, None)
+                ov.show_judgment(title, f"本轮判断失败：{reason[:160]}")  # 详情进聊天记录
+                ov.set_bubble_error(title, reason)  # 浮层面板显示失败原因（不再留旧建议）
                 ov.set_busy(False)
-                ov.set_status("生成失败，请检查网络和服务设置；新消息到来后会重试。", "error")
+                ov.set_status(f"生成失败 · {reason[:70]}", "error")  # 状态栏直接给具体原因
                 ov.log(r)
     except Exception:
         traceback.print_exc()  # 一帧出错不退出
