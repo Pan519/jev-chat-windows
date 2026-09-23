@@ -135,3 +135,6 @@ class Reader:
     def _seen(self, who, name, text):
         # 名字不参与判重：名字行滚出画面后同一条消息会从 her(LO) 变成 her，不能算新消息
         return any(w == who and similar(t, text) for w, _, t in self.seen)
+
+
+from app.noise import is_system_noise  # noqa: F401  —— 识别规则在 app/noise.py（轻量，主进程也能用）

@@ -32,10 +32,12 @@ def chat(protocol: str, base_url: str | None, api_key: str, model: str, system: 
     user_turns: 用户/助手交替的文本，奇数条，首尾都是用户说的（追问补齐候选就是 3 条）。
     thinking: 思考模式。OpenAI 协议没有统一字段，各家自己的开关由调用方经 extra_body 带进来；
               anthropic / gemini 是协议自带的参数，这里直接处理。
+    extra_body: 用户填的高级参数（高级设置里的 JSON）。OpenAI / Anthropic 的官方 SDK 都认
+              extra_body（Stainless 系 SDK 的标准后门），浅合并进请求体；gemini 没有等价机制，忽略。
     """
     if protocol == "anthropic":
         return _anthropic(base_url, api_key, model, system, user_turns,
-                          temperature, max_tokens, thinking, timeout)
+                          temperature, max_tokens, thinking, timeout, extra_body)
     if protocol == "gemini":
         return _gemini(base_url, api_key, model, system, user_turns,
                        temperature, max_tokens, thinking, timeout)
@@ -62,7 +64,7 @@ def _openai(base_url, api_key, model, system, user_turns, temperature, max_token
 
 
 def _anthropic(base_url, api_key, model, system, user_turns, temperature, max_tokens,
-               thinking, timeout) -> str:
+               thinking, timeout, extra_body=None) -> str:
     import anthropic
 
     extra = {}
@@ -75,7 +77,8 @@ def _anthropic(base_url, api_key, model, system, user_turns, temperature, max_to
                                      timeout=timeout, max_retries=2)
         message = client.messages.create(model=model, system=system,
                                          messages=_turns(user_turns), max_tokens=max_tokens,
-                                         temperature=temperature, **extra)
+                                         temperature=temperature, **extra,
+                                         **({"extra_body": extra_body} if extra_body else {}))
     except Exception as exc:
         _fail(exc, "起草")
     # 开了思考的话前面还有 thinking 块，只取文本块

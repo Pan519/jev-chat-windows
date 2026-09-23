@@ -7,16 +7,21 @@
 两个模型（判断 Jev / 起草语言模型）的来源和 key 在独立设置页填写，不用改代码。IDE 里直接 Run。
 """
 import ctypes
+import ctypes.wintypes
+import itertools
 import multiprocessing
+import os
 import queue
 import threading
 import traceback
 from collections import deque
 
+from PySide6.QtCore import QLockFile
+
 from app import settings, update, worker
 from app.capture import find_wechat_hwnd
 from app.fill import fill
-from app.overlay import Overlay
+from app.overlay import Overlay, judgment_text
 from app.version import VERSION
 from core.engine import analyze
 
@@ -28,6 +33,12 @@ chats = {}
 state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": ""}
 results = queue.Queue()
 update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
+_snap_count = 0  # 吸附跟随的节拍计数（tick 里 %5）
+_find_count = 0  # 启动时没找到微信窗口的话，吸附这里隔几秒补找一次
+_result_seq = itertools.count(1)  # 结果序号：浮层拿它判断内容变没变（id() 会被地址复用骗过）
+u32 = ctypes.windll.user32
+u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_uint]  # 64 位下句柄别截断
 
 
 def chat_of(title):
@@ -41,6 +52,23 @@ def target_of(title):
     if chat["target"] in chat["senders"]:
         return chat["target"]
     return chat["senders"][0] if chat["senders"] else None
+
+
+def refresh_analysis():
+    """手动重新生成：用当前会话已有的聊天记录再跑一轮（生成失败、或想换个写法时用）。"""
+    title = ov.current_chat()
+    if not title:
+        ov.set_status("还没有识别到会话，先在微信里点开一个聊天", "warning")
+        return
+    if state["busy"]:
+        ov.set_status("正在生成中，稍等一下再试", "warning")
+        return
+    msgs = list(chat_of(title)["history"])
+    if not any(m[0] == "her" for m in msgs):
+        ov.set_status("当前会话还没有对方的消息，等对方说话后再试", "warning")
+        return
+    chat_of(title)["rev"] += 1  # 手动刷新也是新一轮：旧结果作废
+    start_analyze(title, msgs)
 
 
 def fill_reply(text):
@@ -111,8 +139,11 @@ def analyze_bg(msgs, title, revision, reply_to=None):
                                    base_url=settings.draft_base_url() or None,
                                    reply_to=reply_to, style=settings.style(),
                                    thinking=settings.thinking(),
+                                   draft_extra=settings.draft_extra(),
+                                   filter_noise=settings.filter_system_msgs(),
                                    jev_provider=settings.jev_provider(),
-                                   jev_model=settings.jev_model() or None),
+                                   jev_model=settings.jev_model() or None,
+                                   jev_base_url=settings.jev_base_url() or None),
                      title, revision))
     except Exception as e:
         results.put(("err", f"分析失败: {e}", title, revision))
@@ -128,6 +159,10 @@ def check_update_bg():
 def start_analyze(title, msgs):
     if not settings.has_jev_key():
         ov.set_status("请先在设置中配置模型", "warning")
+        return
+    if (settings.jev_provider() == "custom"
+            and (not settings.jev_base_url() or not settings.jev_model())):
+        ov.set_status("自定义判断来源要填 Base URL 并选一个模型，去设置里补上", "warning")
         return
     if not settings.has_llm_key():
         ov.set_status(f"起草来源 {settings.draft_provider_name()} 没填密钥，去设置里补上", "warning")
@@ -179,12 +214,14 @@ def drain():
             continue
         if kind == "paused":  # 子进程确认已暂停
             ov.set_capture(False)
+            ov.sync_bubble(None, None)  # 不采了，聊天区浮层也收起来
             continue
         if kind == "resumed":  # 子进程重新开始采集
             ov.set_capture(True)
             continue
         if kind == "dead":  # 采集彻底停了（微信关了之类），这才是真的要清状态
             state["area"] = None
+            ov.sync_bubble(None, None)
             for c in chats.values():  # 在跑的分析作废，回来的结果不再往界面上贴
                 c["rev"] += 1
             state["rerun"] = None
@@ -224,9 +261,65 @@ def drain():
             ov.set_status("你已回复，等待对方的新消息")
 
 
+def window_rect(hwnd):
+    """窗口的**可见**边界。GetWindowRect 带着不可见的缩放边框（Win10/11 左右下各 ~7 物理像素，
+    200% 缩放下就是 14 逻辑像素），拿它贴边会悬空一截、高度也对不上肉眼看到的边缘；
+    DWMWA_EXTENDED_FRAME_BOUNDS 才是用户眼睛看到的窗口边缘。取不到（老系统）退回 GetWindowRect。"""
+    rect = ctypes.wintypes.RECT()
+    res = ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect))
+    if res != 0 or rect.right <= rect.left or rect.bottom <= rect.top:
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def follow_wechat():
+    """吸附跟随：每 ~0.5s 读一次微信窗口矩形，把悬浮窗贴到它边上（设置里能关）。
+    启动时没找到微信的，这里隔 ~2s 补找一次，找到就开始跟。
+    微信最小化时矩形是 (-16000,-16000) 这种鬼位置，不查会把悬浮窗算到屏幕外——必须跳过。"""
+    global _find_count
+    if not settings.snap_follow():
+        return
+    if state["hwnd"] is None:
+        _find_count += 1
+        if _find_count % 8:  # snap 每 5 拍才进来一次，8 次就是 ~2s
+            return
+        try:
+            state["hwnd"] = find_wechat_hwnd()
+        except RuntimeError:
+            return
+    if ctypes.windll.user32.IsIconic(state["hwnd"]):  # 最小化：不动，微信还原后接着跟
+        ov.sync_bubble(None, None)  # 微信都没显示，浮层也收起来
+        return
+    ov.snap_to(window_rect(state["hwnd"]))
+    # 同视觉层：悬浮窗不置顶，Z 序钉在微信正下方——微信被别的窗口盖住它也跟着被盖，
+    # 微信在前它就在前。用户正操作悬浮窗（焦点在它）时不压它，松手后下一拍自动归位。
+    me = int(ov.win.winId())
+    if u32.GetForegroundWindow() != me:
+        # NOSIZE|NOMOVE|NOACTIVATE：只调 Z 序，把悬浮窗插到微信（hWndInsertAfter）的下面
+        u32.SetWindowPos(me, state["hwnd"], 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+    # 微信聊天区的气泡浮层：位置/内容/Z 序每拍跟着微信走
+    # state["area"] 是截图帧里的相对坐标，浮层要铺在屏幕上，得加上微信窗口原点；
+    # 右缘直接锚定微信窗口可见右缘（消息区右缘在窗口里还差一截，贴上去不贴边）
+    if state["area"]:
+        wl, wt_, wtr, _ = window_rect(state["hwnd"])
+        abs_area = (wl + state["area"][0], wt_ + state["area"][1], wtr, wt_ + state["area"][3])
+    else:
+        abs_area = None
+    ov.sync_bubble(state["chat"], abs_area)
+    bh = ov.bubble_hwnd()
+    if bh:
+        prev = u32.GetWindow(state["hwnd"], 3)  # GW_HWNDPREV：微信正上方那扇窗
+        # 浮层插到「微信上方那扇」的下面 = 正好压在微信内容上，又不挡别的应用
+        u32.SetWindowPos(bh, prev if prev else 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+
+
 def tick():
+    global _snap_count
     try:
         drain()
+        _snap_count += 1
+        if _snap_count % 5 == 0:  # tick 是 50ms 一拍，5 拍（250ms）跟一次：够跟手也不费电
+            follow_wechat()
         while not update_result.empty():
             latest, url = update_result.get()
             ov.set_update(latest, url)
@@ -241,12 +334,15 @@ def tick():
                 ov.set_busy(False)
                 continue
             if kind == "ok":
+                r["seq"] = next(_result_seq)  # 浮层/界面判断内容新旧用，别拿 id()（地址会复用）
                 chat_of(title)["result"] = r  # 先存着；正看着这个会话才立刻贴上去
+                ov.show_judgment(title, judgment_text(r))  # 判断摘要进那个会话的记录（Jev 气泡）
                 if title == ov.current_chat():
                     ov.show(r)
                 else:
                     ov.set_busy(False)
             else:
+                ov.show_judgment(title, f"本轮判断失败：{str(r)[:160]}")  # 失败也进气泡，别静默
                 ov.set_busy(False)
                 ov.set_status("生成失败，请检查网络和服务设置；新消息到来后会重试。", "error")
                 ov.log(r)
@@ -258,11 +354,18 @@ def tick():
 if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本文件，没这行就无限套娃开进程
     multiprocessing.freeze_support()  # 打包成 exe 后 spawn 出来的子进程会重跑一遍 exe，没这行就无限弹界面
     ctypes.windll.user32.SetProcessDPIAware()
+    # 单实例锁：开两个助手 = 微信上浮着两块气泡层（旧实例画的还是旧结果），看起来像灵异事件
+    _lock = QLockFile(os.path.join(os.environ.get("TEMP", os.path.dirname(os.path.abspath(__file__))),
+                                   "jev-chat-windows.lock"))
+    if not _lock.tryLock(0):
+        print("助手已经在运行了（任务栏/托盘找一下），别再开第二个。")
+        raise SystemExit(0)
     q = multiprocessing.Queue()
     capture_on = multiprocessing.Event()  # 父子进程共用的开关，置位=采集
     debug_on = multiprocessing.Event()  # 同上，置位=子进程往队列里送整帧给调试窗
     ov = Overlay(on_fill=fill_reply, on_toggle_capture=on_toggle_capture,
                  on_target_change=on_target_change, on_toggle_debug=set_debug,
+                 on_refresh=refresh_analysis,
                  result_of=lambda t: chats.get(t, {}).get("result"))
     child = dbg = None
     try:

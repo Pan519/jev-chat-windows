@@ -9,7 +9,9 @@ import traceback
 import numpy as np
 
 from app.capture import Capture, chat_area, unminimize
+from app.noise import is_system_noise
 from app.ocr import Reader, read_title, similar
+from app import settings
 
 
 def _err(q):
@@ -36,6 +38,7 @@ def run(q, hwnd, enabled, debug_on):
     debug_on 置位才往队列里送整帧（一帧 2~3MB），关着一点额外活都不干。"""
     ctypes.windll.user32.SetProcessDPIAware()
     cap = None
+    cap_tries = 0  # WGC 偶发起不来（微信刚启动窗口还没就绪时 GraphicsCaptureItem 转换失败），重试再报死
     readers = {}  # {会话名: Reader}，一个会话一套去重状态
     title, head = "", None  # 当前会话名 / 上一帧的头部像素
     last_area = None  # 上次发给父进程的 4 元组，变了才再发一次
@@ -51,9 +54,14 @@ def run(q, hwnd, enabled, debug_on):
         if cap is None:
             try:
                 cap = Capture(hwnd)
+                cap_tries = 0
             except Exception as e:
-                q.put(("dead", "无法开始采集：" + (" ".join(str(e).split())[:120] or type(e).__name__)))
-                enabled.clear()  # 自己清掉，下一圈就去等着，别一秒重试几十次
+                cap_tries += 1
+                if cap_tries >= 10:  # 十次（约十秒）都不成才算真死，别一秒重试几十次
+                    q.put(("dead", "无法开始采集：" + (" ".join(str(e).split())[:120] or type(e).__name__)))
+                    enabled.clear()  # 自己清掉，下一圈就去等着
+                else:
+                    time.sleep(1)
                 continue
             q.put(("resumed",))
         if not cap.alive():
@@ -90,6 +98,8 @@ def run(q, hwnd, enabled, debug_on):
                     reader = readers.setdefault(title, Reader())
                     lines = reader.read(full[y0:y1, x0:x1], bg)
                     new = reader.new_lines(lines)
+                    if settings.filter_system_msgs():  # 开关：系统通知/时间戳挡在上下文外
+                        new = [m for m in new if not is_system_noise(m[2])]
                     if new:
                         q.put(("lines", title, new, rect))
                 if debug_on.is_set():
