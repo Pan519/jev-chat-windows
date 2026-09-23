@@ -13,6 +13,7 @@ import multiprocessing
 import os
 import queue
 import threading
+import time
 import traceback
 from collections import deque
 
@@ -21,6 +22,8 @@ from PySide6.QtCore import QLockFile
 from app import settings, update, worker
 from app.capture import find_wechat_hwnd
 from app.fill import fill
+from app.noise import is_system_noise
+from app.ocr import similar
 from app.overlay import Overlay, judgment_text
 from app.version import VERSION
 from core.engine import analyze
@@ -30,9 +33,11 @@ from core.engine import analyze
 # 只是缓冲区，实际喂模型几条由设置里的「参考上下文」决定
 # senders：这个群里发过言的人，去重、最近的排最前；target：用户挑的回复对象（None = 跟着最近那个走）
 chats = {}
-state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": ""}
+state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": "",
+         "refresh_wait": None, "refresh_ts": 0.0}
 results = queue.Queue()
 update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
+cmd_q = multiprocessing.Queue()  # 发给采集子进程的指令（"refresh" = 强制重读当前画面）  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
 _snap_count = 0  # 吸附跟随的节拍计数（tick 里 %5）
 _find_count = 0  # 启动时没找到微信窗口的话，吸附这里隔几秒补找一次
 _result_seq = itertools.count(1)  # 结果序号：浮层拿它判断内容变没变（id() 会被地址复用骗过）
@@ -54,8 +59,19 @@ def target_of(title):
     return chat["senders"][0] if chat["senders"] else None
 
 
+def _finish_refresh(title):
+    """拿到最新内容（或超时兜底）后，用当前会话历史再跑一轮分析。"""
+    msgs = list(chat_of(title)["history"])
+    if not any(m[0] == "her" for m in msgs):
+        ov.set_status("当前会话还没有对方的消息，等对方说话后再试", "warning")
+        return
+    chat_of(title)["rev"] += 1  # 手动刷新也是新一轮：旧结果作废
+    start_analyze(title, msgs)
+
+
 def refresh_analysis():
-    """手动重新生成：用当前会话已有的聊天记录再跑一轮（生成失败、或想换个写法时用）。"""
+    """手动重新生成：先让采集子进程对当前画面强制重跑一遍 OCR（拿到最新内容再生成），
+    子进程回传后合并进历史再分析；4 秒没回传就按已有历史兜底。"""
     title = ov.current_chat()
     if not title:
         ov.set_status("还没有识别到会话，先在微信里点开一个聊天", "warning")
@@ -63,12 +79,16 @@ def refresh_analysis():
     if state["busy"]:
         ov.set_status("正在生成中，稍等一下再试", "warning")
         return
-    msgs = list(chat_of(title)["history"])
-    if not any(m[0] == "her" for m in msgs):
+    if not any(m[0] == "her" for m in chat_of(title)["history"]) and child is None:
         ov.set_status("当前会话还没有对方的消息，等对方说话后再试", "warning")
         return
-    chat_of(title)["rev"] += 1  # 手动刷新也是新一轮：旧结果作废
-    start_analyze(title, msgs)
+    if child is not None:
+        state["refresh_wait"] = title
+        state["refresh_ts"] = time.time()
+        cmd_q.put("refresh")
+        ov.set_status("正在读取最新消息…", "busy")
+    else:
+        _finish_refresh(title)
 
 
 def fill_reply(text):
@@ -86,7 +106,7 @@ def fill_reply(text):
 def spawn_worker():
     """开一个采集子进程，它跟着 capture_on 走：置位=采集，清掉=暂停。"""
     p = multiprocessing.Process(target=worker.run,
-                                args=(q, state["hwnd"], capture_on, debug_on), daemon=True)
+                                args=(q, state["hwnd"], capture_on, debug_on, cmd_q), daemon=True)
     p.start()
     return p
 
@@ -212,6 +232,26 @@ def drain():
             ov.set_status(msg[1], "warning")
             ov.log(msg[1])
             continue
+        if kind == "refresh_lines":  # 「重新生成」的强制重读结果：合并进历史（按相似度去重）再生成
+            _, title, rows, rect = msg
+            state["area"] = rect
+            chat = chat_of(title)
+            for who, name, text in rows:
+                if settings.filter_system_msgs() and is_system_noise(text):
+                    continue
+                if any(w == who and similar(t, text) for w, t, _ in chat["history"]):
+                    continue  # 已经在历史里的不重复记
+                chat["history"].append((who, text, name))
+                ov.log_message(who, text, name, chat=title)
+                if who == "her" and name:
+                    if name in chat["senders"]:
+                        chat["senders"].remove(name)
+                    chat["senders"].insert(0, name)
+            ov.set_targets(title, chat["senders"], target_of(title))
+            if state["refresh_wait"] == title:
+                state["refresh_wait"] = None
+                _finish_refresh(title)
+            continue
         if kind == "paused":  # 子进程确认已暂停
             ov.set_capture(False)
             ov.sync_bubble(None, None)  # 不采了，聊天区浮层也收起来
@@ -229,6 +269,7 @@ def drain():
             ov.set_busy(False)
             ov.set_capture(False, msg[1])
             ov.log(msg[1])
+            state["refresh_wait"] = None  # 采集都没了，刷新等待作废
             if child is not None:  # 子进程已经不干活了，收掉引用，下次打开开关重开一个
                 child.terminate()
                 child.join()
@@ -317,6 +358,9 @@ def tick():
     global _snap_count
     try:
         drain()
+        if state["refresh_wait"] and time.time() - state["refresh_ts"] > 4:
+            title, state["refresh_wait"] = state["refresh_wait"], None  # 子进程没回话：按已有历史兜底
+            _finish_refresh(title)
         _snap_count += 1
         if _snap_count % 5 == 0:  # tick 是 50ms 一拍，5 拍（250ms）跟一次：够跟手也不费电
             follow_wechat()

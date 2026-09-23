@@ -3,6 +3,7 @@
 一次 OCR 250~800ms，放父进程的 Qt 主线程界面就僵了。
 只往队列里丢纯 tuple/str（底色 bg 是 numpy，留在这边不过队列）。帧全程内存，绝不落盘。"""
 import ctypes
+import queue
 import time
 import traceback
 
@@ -32,7 +33,7 @@ def _packet(full, area, title, reader, lines):
             "ocr_ms": reader.last_ms if reader else 0, "ts": time.time()}
 
 
-def run(q, hwnd, enabled, debug_on):
+def run(q, hwnd, enabled, debug_on, cmd_q=None):
     """enabled 置位=采集，清掉=暂停。暂停时停掉 WGC 会话（Windows 那圈黄色采集边框也跟着没了），
     恢复时重开一个；readers 一直留着，去重状态不丢，恢复后不会把屏幕上的旧消息再报一遍。
     debug_on 置位才往队列里送整帧（一帧 2~3MB），关着一点额外活都不干。"""
@@ -51,6 +52,30 @@ def run(q, hwnd, enabled, debug_on):
                 q.put(("paused",))
             enabled.wait()
             continue
+        want_refresh = False
+        if cmd_q is not None:  # 「重新生成」先取最新内容：对当前画面强制重跑一遍 OCR
+            try:
+                while True:
+                    if cmd_q.get_nowait() == "refresh":
+                        want_refresh = True
+            except queue.Empty:
+                pass
+        if want_refresh and cap is not None and cap.latest is not None:
+            try:
+                full = cap.latest
+                area = chat_area(full)
+                if area:
+                    x0, y0, x1, y1, bg, y_pane = area
+                    cap.area = area
+                    name = read_title(full[y_pane:y0, x0:x1]) or title or "当前会话"
+                    name = next((k for k in readers if similar(k, name)), name)
+                    reader = readers.setdefault(name, Reader())
+                    rows = [(w, n, t) for w, n, t, _ in reader.read(full[y0:y1, x0:x1], bg)]
+                    if settings.filter_system_msgs():
+                        rows = [m for m in rows if not is_system_noise(m[2])]
+                    q.put(("refresh_lines", name, rows, (x0, y0 + 0, x1, y1)))
+            except Exception:
+                _err(q)
         if cap is None:
             try:
                 cap = Capture(hwnd)

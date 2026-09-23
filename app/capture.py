@@ -97,6 +97,7 @@ class Capture:
 
         self.settle, self.max_wait = settle, max_wait
         self.shape = self.area = self.last = self.pending = None
+        self.latest = None  # 最新一帧常驻（「重新生成」强制重读用，不等画面变化）
         self.t = self.t0 = 0.0
         cap = WindowsCapture(window_hwnd=hwnd)  # cursor_capture/draw_border 留默认，老版 Win10 不支持切换会抛异常
         cap.event(self.on_frame_arrived)
@@ -105,6 +106,7 @@ class Capture:
 
     def on_frame_arrived(self, frame, control):
         full = np.ascontiguousarray(frame.frame_buffer[:, :, :3][:, :, ::-1])  # BGRA → RGB；缓冲区回调后就没了，必须拷
+        self.latest = full
         if full.max() == 0:
             return
         if self.area is None or full.shape != self.shape:

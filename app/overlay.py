@@ -426,7 +426,7 @@ class _BubbleLayer(QWidget):
         （settings.bubble_offset，松手即存，重启不变）。拖拽进行中不抢位置。"""
         x0, y_top, x1, y_in = area
         dpr = QApplication.instance().primaryScreen().devicePixelRatio() or 1.0
-        w = max(240, min(340, round((x1 - x0) / dpr) - 12))
+        w = max(216, min(316, round((x1 - x0) / dpr) - 36))  # 比之前窄 2 个中文字符（上限 340-24）
         half_h = round((y_in - y_top) / dpr * 0.5) - 6
         h = min(290, max(170, half_h))
         self._placed = (w, h)
